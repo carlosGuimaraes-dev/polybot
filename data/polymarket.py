@@ -6,7 +6,7 @@ import re
 import json
 import logging
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from config import GAMMA_API, CLOB_API, CITY_ALIASES, MIN_MARKET_VOLUME_USDC
 
 logger = logging.getLogger(__name__)
@@ -192,8 +192,18 @@ def fetch_temperature_markets() -> list[dict]:
     Raises on API failure — no fake fallback.
     """
     all_markets = []
-    batch = 500
-    for offset in range(0, 20000, batch):
+    batch = 100
+    # Gamma API now caps limit at 100 and rejects offsets above ~2000 with 422.
+    # Thousands of stale "active" markets have endDate in the past and would
+    # crowd out real ones — filter with end_date_min (today) so soonest-ending
+    # real markets sort first.
+    max_offset = 2000
+    # Use LOCAL date (not UTC) with a 1-day lookback buffer — daily weather
+    # markets end "today" local time and must not be excluded near midnight.
+    today = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    for offset in range(0, max_offset + batch, batch):
+        if offset > max_offset:
+            break
         resp = requests.get(
             f"{GAMMA_API}/markets",
             params={
@@ -203,15 +213,21 @@ def fetch_temperature_markets() -> list[dict]:
                 "offset": offset,
                 "order": "endDate",
                 "ascending": "true",
+                "end_date_min": today,
             },
             timeout=20,
         )
+        if resp.status_code == 422:
+            logger.info("Pagination hit API limit at offset=%d — stopping walk.", offset)
+            break
         resp.raise_for_status()
         data = resp.json()
         if not data:
             break
         all_markets.extend(data)
         logger.debug("Fetched %d markets (offset=%d)", len(all_markets), offset)
+        if len(data) < batch:
+            break
 
     logger.info("Total active markets fetched: %d", len(all_markets))
 

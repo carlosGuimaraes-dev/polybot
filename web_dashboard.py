@@ -3,6 +3,7 @@
 import logging
 import os
 import subprocess
+import sys
 import time
 import threading
 import traceback
@@ -46,7 +47,7 @@ _CAL_PLACEHOLDER = {
 def _run_job(job_id: str, cmd_flag: str, mode: str = "paper"):
     try:
         result = subprocess.run(
-            ["python3", "main.py", "--mode", mode, cmd_flag],
+            [sys.executable, "main.py", "--mode", mode, cmd_flag],
             capture_output=True, text=True, timeout=600,
             cwd=_BOT_DIR,
         )
