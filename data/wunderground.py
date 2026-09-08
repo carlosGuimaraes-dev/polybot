@@ -78,7 +78,90 @@ def _fetch_wu_page(icao: str, target_date: str) -> str:
     raise WundergroundError(
         f"WU page fetch failed for {icao} {target_date} after "
         f"{len(_RETRY_DELAYS) + 1} attempts: {last_exc}"
-    ) from last_exc
+    )
+
+
+# ── TWC JSON API (the data source the WU page itself calls) ──────────────────
+# Since ~2026-09 WU's history page serves a React shell without embedded
+# observations (client-side XHR only). The page's JS calls api.weather.com
+# directly with a public apiKey injected into the page shell — we call the
+# same endpoint. Verified working 2026-09-06 for US + international stations,
+# today and past dates, metric units.
+_TWC_API_BASE = "https://api.weather.com"
+_TWC_API_KEY = "f6d2efe5720d47ea92efe5720df7eaa8"  # public key from WU page shell
+
+# ICAO → ISO country code for the v1 location key format `{icao}:9:{cc}`.
+# Every entry verified against the API on 2026-09-06 (36/37 direct hits).
+_STATION_COUNTRY = {
+    "KLGA": "US", "KORD": "US", "KATL": "US", "KMIA": "US", "KDAL": "US",
+    "KSEA": "US", "KHOU": "US", "KLAX": "US", "KDEN": "US", "KAUS": "US",
+    "KSFO": "US",
+    "EGLL": "GB", "LFPG": "FR", "LEMD": "ES", "EDDM": "DE", "LIMC": "IT",
+    "VHHH": "HK", "CYYZ": "CA", "SAEZ": "AR", "SBGR": "BR", "LLBG": "IL",
+    "RKSS": "KR", "RJTT": "JP", "WSSS": "SG",
+    "ZBAA": "CN", "ZSPD": "CN", "ZGSZ": "CN", "ZHHH": "CN", "ZUUU": "CN",
+    "ZUCK": "CN",
+    "RCTP": "TW", "VILK": "IN", "LTAC": "TR", "EPWA": "PL", "LTFM": "TR",
+    "NZWN": "NZ", "MMMX": "MX",
+    "LTBA": "TR",   # alias target for LTFM (see _STATION_ALIAS)
+}
+
+# LTFM (Istanbul New Airport) is absent from TWC's v1 station database.
+# LTBA (Atatürk, ~35km away) is the closest substitute — fine for advisory
+# nowcasting; market resolution should rely on ASOS/ERA5 first anyway.
+_STATION_ALIAS = {"LTFM": "LTBA"}
+
+
+def _twc_location_key(icao: str) -> str:
+    """Build the TWC v1 location key `{icao}:9:{cc}` for a station."""
+    lookup = _STATION_ALIAS.get(icao, icao)
+    cc = _STATION_COUNTRY.get(lookup)
+    if not cc:
+        raise WundergroundError(f"No country code mapped for {icao} — TWC API unavailable")
+    return f"{lookup}:9:{cc}"
+
+
+def _twc_fetch_observations(icao: str, start_date: str, end_date: str) -> list[dict]:
+    """
+    Fetch observations from the TWC v1 historical endpoint (same source the
+    WU page calls). Dates as YYYYMMDD. Returns raw obs dicts
+    ({valid_time_gmt: epoch_s, temp: °C metric, ...}).
+    Raises WundergroundError on failure.
+    """
+    url = (f"{_TWC_API_BASE}/v1/location/{_twc_location_key(icao)}/observations/"
+           f"historical.json?apiKey={_TWC_API_KEY}&units=m"
+           f"&startDate={start_date}&endDate={end_date}")
+    last_exc: Exception | None = None
+    for attempt, delay in enumerate([0] + _RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=TIMEOUT)
+            if resp.status_code == 400:
+                # invalid location/date — not transient, don't retry
+                raise WundergroundError(
+                    f"TWC API rejected request for {icao} ({start_date}-{end_date}): "
+                    f"{resp.text[:120]}"
+                )
+            resp.raise_for_status()
+            obs = resp.json().get("observations")
+            if obs is None:
+                raise WundergroundError(f"TWC response missing observations for {icao}")
+            return obs
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                requests.exceptions.HTTPError) as e:
+            last_exc = e
+    raise WundergroundError(f"TWC API fetch failed for {icao}: {last_exc}")
+
+
+def _twc_daily_high(icao: str, target_date: str) -> float:
+    """Daily high (°C) for target_date ('YYYY-MM-DD') from the TWC API."""
+    ymd = target_date.replace("-", "")
+    obs = _twc_fetch_observations(icao, ymd, ymd)
+    temps = [float(o["temp"]) for o in obs if o.get("temp") is not None]
+    if not temps:
+        raise WundergroundError(f"No temperatures in TWC response for {icao} {target_date}")
+    return max(temps)
 
 
 def _extract_json_blob(html: str) -> dict | None:
@@ -166,6 +249,15 @@ def get_historical_high(icao: str, target_date: str) -> float:
     target_date: 'YYYY-MM-DD'
     Raises WundergroundError if unavailable or parsing fails.
     """
+    # Primary: TWC JSON API (the WU page no longer embeds obs in its HTML)
+    try:
+        high = _twc_daily_high(icao, target_date)
+        logger.info("WU/TWC %s %s: daily high = %.1f°C", icao, target_date, high)
+        return high
+    except WundergroundError as e:
+        logger.warning("TWC API unavailable for %s %s (%s) — falling back to HTML page",
+                       icao, target_date, e)
+
     html = _fetch_wu_page(icao, target_date)
     blob = _extract_json_blob(html)
 
@@ -197,9 +289,47 @@ def get_historical_high(icao: str, target_date: str) -> float:
 
 def get_live_hourly(icao: str) -> list[dict]:
     """
-    Fetch today's hourly observations from Wunderground.
+    Fetch today's hourly observations (°C) for an ICAO station.
+    Primary source: TWC JSON API (same endpoint the WU page calls).
+    Fallback: legacy WU HTML page parsing (no longer served with data).
     Returns list of {time_local, temp_c} sorted by time.
     Raises WundergroundError if unavailable.
+    """
+    today = date.today()
+    today_ymd = today.strftime("%Y%m%d")
+    try:
+        obs = _twc_fetch_observations(icao, today_ymd, today_ymd)
+    except WundergroundError as e:
+        logger.warning("TWC live obs failed for %s (%s) — falling back to HTML page",
+                       icao, e)
+        return _get_live_hourly_html(icao)
+
+    hourly = []
+    for o in obs:
+        if o.get("temp") is None:
+            continue
+        try:
+            ts = int(o.get("valid_time_gmt") or 0)
+            t = float(o["temp"])
+        except (TypeError, ValueError):
+            continue
+        # Keep only the machine-local calendar day (parity with the old page-based
+        # behavior) so the previous day's evening temps don't inflate the max.
+        if datetime.fromtimestamp(ts).date() != today:
+            continue
+        hourly.append({"time_local": str(ts), "temp_c": t})
+
+    if not hourly:
+        raise WundergroundError(f"Parsed 0 hourly observations for {icao} today")
+
+    return sorted(hourly, key=lambda x: x["time_local"])
+
+
+def _get_live_hourly_html(icao: str) -> list[dict]:
+    """
+    Legacy path: parse today's hourly obs out of the WU HTML page.
+    Kept as fallback in case the TWC API is unreachable. The page has served
+    a data-less React shell since ~2026-09, so this usually raises.
     """
     today_str = date.today().isoformat()
     html = _fetch_wu_page(icao, today_str)

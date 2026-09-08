@@ -266,6 +266,13 @@ def init_db():
             conn.execute("ALTER TABLE trades ADD COLUMN bankroll_fix_applied INTEGER DEFAULT 0")
         except Exception:
             pass  # Column already exists
+        # clob_token_yes: CLOB token for the YES outcome, needed by open_trade_atomic.
+        # Added to the CREATE TABLE schema without a migration — pre-existing DBs
+        # crashed with 'table trades has no column named clob_token_yes' at trade entry.
+        try:
+            conn.execute("ALTER TABLE trades ADD COLUMN clob_token_yes TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass  # Column already exists
         fixed = conn.execute(
             "SELECT COUNT(*) as c FROM trades WHERE status='lost' AND bankroll_fix_applied=0"
         ).fetchone()["c"]

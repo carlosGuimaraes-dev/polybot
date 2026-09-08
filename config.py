@@ -42,7 +42,11 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = "https://clob.polymarket.com"
 
 # Trading thresholds
-MIN_EDGE             = 0.25   # raised from 0.12 — 0.12-0.20 edge trades had 19% win rate
+MIN_EDGE             = 0.18   # EXPERIMENT (2026-09-06, paper only): lowered from 0.25 to
+                              # collect resolved-trade evidence for the 0.18-0.25 band. Prior evidence:
+                              # 0.12-0.20 band had 19% win rate — expect this to underperform; revert
+                              # to 0.25 if band win rate < 70% or ROI negative after ~20 resolved trades.
+                              # Do NOT deploy this value to the live host.
 MIN_WIN_PROB         = 0.90   # min p_win for NO trades after shrinkage — filters bad 80-90% confidence bucket (45.5% actual win rate)
 MIN_WIN_PROB_YES     = 0.55   # min model_prob for YES trades — lower bar since YES = model predicts the bucket
 NO_ENTRY_MIN_PRICE   = 0.20   # don't buy NO below 20¢ — market too confident in YES, model loses this fight (0/4 live, -100% ROI)
