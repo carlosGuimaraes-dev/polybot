@@ -313,6 +313,7 @@ def compute_edge(
     final_model_prob = blended_prob
     nowcast_weight = 0.0
     running_max = None
+    sources = None
 
     if apply_nowcast and city_name in CITIES:
         cfg = CITIES[city_name]
@@ -322,8 +323,9 @@ def compute_edge(
             if market.get("_nowcast_fetched"):
                 running_max = market.get("_cached_running_max_c")
                 temp_rate   = market.get("_cached_temp_rate_c_per_h")
+                sources     = market.get("_cached_running_max_sources")
             else:
-                running_max, temp_rate = get_running_max_c(city_name)
+                running_max, temp_rate, sources = get_running_max_c(city_name)
             if running_max is None:
                 logger.debug("%s: nowcast unavailable, using model only", city_name)
             else:
@@ -534,6 +536,7 @@ def compute_edge(
         "kelly_f":              round(kf, 4),
         "nowcast_weight":       round(nowcast_weight, 3),
         "running_max_c":        running_max,
+        "running_max_sources":  sources,
         "bucket_lo_c":          lo_c,
         "bucket_hi_c":          hi_c,
         "target_date":          target_date,

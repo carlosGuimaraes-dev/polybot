@@ -15,7 +15,7 @@ import logging
 import math
 from datetime import datetime, date
 import pytz
-from config import CITIES
+from config import CITIES, ASOS_RESOLUTION_CITIES
 from data.noaa import get_running_max_today, fetch_metar
 from data.wunderground import get_running_max_wu
 
@@ -46,64 +46,73 @@ def nowcast_confidence(timezone_str: str) -> float:
     return 0.95
 
 
-def get_running_max_c(city_name: str) -> tuple[float | None, float | None]:
+def get_running_max_c(city_name: str) -> tuple[float | None, float | None, dict]:
     """
     Get today's running max temperature and temperature trend for a city.
 
-    Returns (running_max_c, temp_rate_c_per_h).
-      running_max_c    — highest temperature observed so far today (°C), or None
+    Returns (running_max_c, temp_rate_c_per_h, sources).
+      running_max_c     — highest temperature observed so far today (°C), or None
       temp_rate_c_per_h — rate of change over last ~2h (°C/h), or None if < 3 obs
-          > 0  = still warming
-          < 0  = cooling / past peak
+      sources           — {"metar_c": ..., "asos_c": ..., "wu_c": ...} raw values,
+                          logged into scan_log for post-mortems
 
-    Priority: METAR (point-in-time) combined with ASOS (running max + rate),
-    then ASOS alone, then WU alone (no rate available from WU).
+    Merge priority follows Polymarket's resolution source
+    (config.ASOS_RESOLUTION_CITIES): most cities resolve on Wunderground, so
+    the WU reading is primary there; Tel Aviv resolves on ASOS/NOAA. The other
+    sources are cross-checks only — divergence is logged, never merged via
+    max() (a max() merge let a transient reading manufacture a fake NO edge
+    in Atlanta on 2026-09-07).
     """
     cfg = CITIES.get(city_name)
     if not cfg:
-        return None, None
+        return None, None, {}
     icao = cfg["icao"]
     asos = cfg["asos_station"]
     tz   = cfg["timezone"]
 
-    # 1. Try METAR (most current point-in-time) combined with ASOS running max + rate
+    # 1. Collect every source raw — no merging yet
+    metar_temp = None
     try:
         metar_data = fetch_metar([icao])
         if icao in metar_data:
-            temp_c = metar_data[icao]["temp_c"]
-            logger.debug("METAR %s: current %.1f°C", icao, temp_c)
-            asos_result = get_running_max_today(asos, tz)
-            if asos_result:
-                running_max = max(temp_c, asos_result["running_max_c"])
-                rate = asos_result.get("temp_rate_c_per_h")
-            else:
-                running_max = temp_c
-                rate = None
-
-            # Cross-check with WU (advisory only — never veto METAR)
-            wu_max = get_running_max_wu(icao)
-            if wu_max is not None:
-                if abs(wu_max - running_max) > 2.0:
-                    logger.warning(
-                        "%s: WU (%.1f°C) and METAR/ASOS (%.1f°C) disagree by > 2°C — "
-                        "trusting METAR/ASOS (WU scraping may be stale)",
-                        icao, wu_max, running_max
-                    )
-                else:
-                    running_max = max(running_max, wu_max)
-
-            return running_max, rate
+            metar_temp = metar_data[icao]["temp_c"]
     except Exception as e:
         logger.warning("METAR fetch failed for %s: %s", icao, e)
 
-    # 2. ASOS only
+    asos_max = None
+    rate = None
     asos_result = get_running_max_today(asos, tz)
     if asos_result:
-        return asos_result["running_max_c"], asos_result.get("temp_rate_c_per_h")
+        asos_max = asos_result["running_max_c"]
+        rate = asos_result.get("temp_rate_c_per_h")
 
-    # 3. WU only (no rate available)
-    wu_max = get_running_max_wu(icao)
-    return wu_max, None
+    wu_temp = get_running_max_wu(icao)
+
+    sources = {"metar_c": metar_temp, "asos_c": asos_max, "wu_c": wu_temp}
+    logger.info("Nowcast sources %s: metar=%s asos=%s wu=%s",
+                city_name, metar_temp, asos_max, wu_temp)
+
+    # 2. Merge with the resolution-aligned source as primary
+    if city_name in ASOS_RESOLUTION_CITIES:
+        candidates = [v for v in (metar_temp, asos_max) if v is not None]
+        running_max = max(candidates) if candidates else wu_temp
+    elif wu_temp is not None:
+        # WU is Polymarket's resolution source for this city
+        running_max = wu_temp
+        others = [v for v in (metar_temp, asos_max) if v is not None]
+        # Flag only when WU is the odd one out (diverges from every other source);
+        # a single outlier METAR next to two agreeing sources is not a WU problem.
+        if others and all(abs(wu_temp - v) > 2.0 for v in others):
+            logger.warning(
+                "%s: WU (%.1f°C) is the outlier vs METAR/ASOS %s — "
+                "keeping WU (resolution source) but flagging",
+                city_name, wu_temp, others
+            )
+    else:
+        candidates = [v for v in (metar_temp, asos_max) if v is not None]
+        running_max = max(candidates) if candidates else None
+
+    return running_max, rate, sources
 
 
 def compute_nowcast_bucket_prob(
@@ -165,15 +174,26 @@ def compute_nowcast_bucket_prob(
     # margin prevents premature hard-zeros caused by this sensor offset.
     _HARD_ZERO_MARGIN_C = 1.0  # °C above bucket_hi before declaring YES impossible
 
-    # Case 1: running_max ≥ bucket_hi + margin → YES is impossible.
-    #   e.g. running_max=29°C and bucket=[25.5,26.5)°C — the high is already well
-    #   above the ceiling, so the bucket cannot resolve YES regardless of what happens next.
-    if bucket_hi_c is not None and running_max_c >= bucket_hi_c + _HARD_ZERO_MARGIN_C:
+    # Observed max vs bucket ceiling — the sensor margin applies consistently:
+    #  - running_max ≥ bucket_hi + margin → YES is impossible (hard zero)
+    #  - running_max within the margin above bucket_hi → can't be sure the
+    #    bucket was truly exceeded (sensors can over-read); defer to the
+    #    unconditioned model instead of clamping to zero. Clamping here
+    #    manufactured a fake NO edge in Atlanta on 2026-09-07 (observed
+    #    running max 84.0°F vs true daily max 82°F).
+    if bucket_hi_c is not None and running_max_c > bucket_hi_c:
+        if running_max_c >= bucket_hi_c + _HARD_ZERO_MARGIN_C:
+            logger.debug(
+                "Nowcast hard-zero: running_max=%.1f >= bucket_hi=%.1f + margin=%.1f — YES impossible",
+                running_max_c, bucket_hi_c, _HARD_ZERO_MARGIN_C,
+            )
+            return 0.0
         logger.debug(
-            "Nowcast hard-zero: running_max=%.1f >= bucket_hi=%.1f + margin=%.1f — YES impossible",
-            running_max_c, bucket_hi_c, _HARD_ZERO_MARGIN_C,
+            "Nowcast margin zone: running_max=%.1f within %.1f°C of bucket_hi=%.1f — "
+            "using unconditioned model prob",
+            running_max_c, _HARD_ZERO_MARGIN_C, bucket_hi_c,
         )
-        return 0.0
+        return model_prob
 
     # Case 2: running_max ≥ bucket_lo and bucket has no ceiling (≥X markets) →
     #   YES is already guaranteed (the daily high has hit the threshold).

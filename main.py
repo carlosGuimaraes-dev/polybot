@@ -495,9 +495,9 @@ def cmd_scan(dry_run=False, live=False, opportunistic=False):
         from signals.nowcaster import nowcast_confidence, get_running_max_c
         _nw = nowcast_confidence(cfg["timezone"])
         if _nw > 0.05:
-            _running_max, _temp_rate = get_running_max_c(city)
+            _running_max, _temp_rate, _sources = get_running_max_c(city)
         else:
-            _running_max, _temp_rate = None, None
+            _running_max, _temp_rate, _sources = None, None, None
 
         # Fetch open trades once per city/date group — shared across all bucket evaluations
         # to avoid N×M DB queries (N cities × M buckets × 3 callers each).
@@ -536,6 +536,7 @@ def cmd_scan(dry_run=False, live=False, opportunistic=False):
         for market in bucket_markets:
             market["_cached_running_max_c"]     = _running_max
             market["_cached_temp_rate_c_per_h"] = _temp_rate
+            market["_cached_running_max_sources"] = _sources
             market["_nowcast_fetched"] = True
             question = market.get("question", "")
             market_id = market.get("market_id", "")
@@ -1037,7 +1038,7 @@ def cmd_nowcast():
     for city, cfg in sorted(CITIES.items()):
         conf = nowcast_confidence(cfg["timezone"])
         if conf > 0:
-            running_max, temp_rate = get_running_max_c(city)
+            running_max, temp_rate, _ = get_running_max_c(city)
             rate_str = (f"  {temp_rate:+.1f}°C/h" if temp_rate is not None else "")
             rows.append([
                 city, cfg["icao"],

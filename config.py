@@ -140,6 +140,11 @@ CITY_FORECAST_BIAS_C = {
 # How many days of history to backfill
 BACKFILL_DAYS        = 180
 
+# Cities where Polymarket resolves via ASOS/NOAA instead of Wunderground.
+# All other cities resolve on Wunderground — single source of truth shared by
+# position_manager (resolution) and nowcaster (live-obs merge priority).
+ASOS_RESOLUTION_CITIES = {"Tel Aviv"}
+
 # ── City configurations ───────────────────────────────────────────────────────
 # icao         : 4-char ICAO airport station code (Wunderground + ASOS identifier)
 # lat / lon    : coordinates for Open-Meteo forecast queries

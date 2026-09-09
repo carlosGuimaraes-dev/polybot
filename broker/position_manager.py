@@ -21,13 +21,13 @@ from datetime import date, timedelta
 from data.wunderground import get_historical_high, WundergroundError
 from data.noaa import fetch_asos_daily_max
 from data.openmeteo import fetch_historical_actuals
-from config import CITIES
+from config import CITIES, ASOS_RESOLUTION_CITIES
 import db
 
 logger = logging.getLogger(__name__)
 
-# Cities where Polymarket resolves via ASOS/NOAA directly (not Wunderground)
-_ASOS_PRIMARY_CITIES = {"Tel Aviv"}
+# Kept as an alias so the resolution code below reads naturally.
+_ASOS_PRIMARY_CITIES = ASOS_RESOLUTION_CITIES
 
 _GAMMA_API = "https://gamma-api.polymarket.com/markets"
 

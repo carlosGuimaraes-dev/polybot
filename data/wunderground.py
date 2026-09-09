@@ -1,10 +1,10 @@
 """
-Wunderground data fetcher — last-resort fallback for temperature resolution.
+Wunderground data fetcher — PRIMARY resolution source for most cities.
 
-Resolution source priority (position_manager.py):
-  1. Iowa State ASOS — official airport obs (primary)
-  2. Open-Meteo Archive — ERA5 reanalysis (reliable fallback)
-  3. Wunderground — this module (last resort; may differ from official records)
+Resolution source priority (broker/position_manager.py):
+  1. Wunderground — Polymarket's stated resolution source for most cities
+  2. Iowa State ASOS — official airport obs (fallback, primary for Tel Aviv)
+  3. Open-Meteo Archive — ERA5 reanalysis (last resort)
 
 WU is also used for live intraday obs in the nowcaster (advisory only).
 """
