@@ -39,6 +39,13 @@ def parse_question(question: str) -> dict | None:
     """
     q = question.lower()
 
+    # Low-temperature (mínima) markets resolve on the daily LOW — a question our
+    # high-temp model does not answer. Trading them as highs manufactured fake
+    # 80pp edges (Miami 2026-09-08: bought NO on "lowest in 78-79°F" at 17¢ and
+    # lost). Block until a dedicated low pipeline exists (see .wayfinder tickets).
+    if "lowest" in q or "minimum" in q:
+        return None
+
     # Find city
     city = None
     for alias, canonical in sorted(CITY_ALIASES.items(), key=lambda x: -len(x[0])):
